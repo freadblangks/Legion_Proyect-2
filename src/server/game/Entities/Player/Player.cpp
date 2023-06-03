@@ -14309,7 +14309,13 @@ InventoryResult Player::CanStoreItem(uint8 bag, uint8 slot, ItemPosCountVec &des
     }*/ // it doesn't work that way!
 
     // search free slot
-    res = CanStoreItem_InInventorySlots(INVENTORY_SLOT_ITEM_START, GetInventoryEndSlot(), dest, pProto, count, false, pItem, bag, slot);
+    uint8 searchSlotStart = INVENTORY_SLOT_ITEM_START;
+    // new bags can be directly equipped
+    if (!pItem && pProto->GetClass() == ITEM_CLASS_CONTAINER && pProto->GetSubClass() == ITEM_SUBCLASS_CONTAINER &&
+        (pProto->GetBonding() == NO_BIND || pProto->GetBonding() == BIND_WHEN_PICKED_UP))
+        searchSlotStart = INVENTORY_SLOT_BAG_START;
+
+    res = CanStoreItem_InInventorySlots(searchSlotStart, INVENTORY_SLOT_ITEM_END, dest, pProto, count, false, pItem, bag, slot);
     if (res != EQUIP_ERR_OK)
     {
         if (no_space_count)
@@ -16818,7 +16824,8 @@ void Player::SplitItem(uint16 src, uint16 dst, uint32 count)
 
 void Player::SwapItem(uint16 src, uint16 dst)
 {
-    if (!IsInWorld())
+    // If we want to swap the same item it is useless.
+    if (src == dst)
         return;
 
     uint8 srcbag = src >> 8;
@@ -16853,19 +16860,19 @@ void Player::SwapItem(uint16 src, uint16 dst)
             }
         }
     }
-    // else if (pDstItem && pDstItem->HasFlag(ITEM_FIELD_DYNAMIC_FLAGS, ITEM_FLAG_CHILD))
-    // {
-        // if (Item* parentItem = GetItemByGuid(pDstItem->GetGuidValue(ITEM_FIELD_CREATOR)))
-        // {
-            // if (IsEquipmentPos(dst))
-            // {
-                // AutoUnequipChildItem(parentItem);   // we need to unequip child first since it cannot go into whatever is going to happen next
-                // SwapItem(src, dst);                 // dst is now empty
-                // SwapItem(parentItem->GetPos(), src);// src is now empty
-                // return;
-            // }
-        // }
-    // }
+    else if (pDstItem && pDstItem->HasFlag(ITEM_FIELD_DYNAMIC_FLAGS, ITEM_FLAG_CHILD))
+    {
+        if (Item* parentItem = GetItemByGuid(pDstItem->GetGuidValue(ITEM_FIELD_CREATOR)))
+        {
+            if (IsEquipmentPos(dst))
+            {
+                AutoUnequipChildItem(parentItem);   // we need to unequip child first since it cannot go into whatever is going to happen next
+                SwapItem(src, dst);                 // dst is now empty
+                SwapItem(parentItem->GetPos(), src);// src is now empty
+                return;
+            }
+        }
+    }
 
     TC_LOG_DEBUG(LOG_FILTER_PLAYER_ITEMS, "STORAGE: SwapItem bag = %u, slot = %u, item = %u", dstbag, dstslot, pSrcItem->GetEntry());
 
@@ -18836,6 +18843,120 @@ bool Player::CanAddQuest(Quest const* quest, bool msg)
     return true;
 }
 
+void Player::AutoCompleteObjectives(Quest const* quest, bool onlyBugged)
+{
+    for (uint32 i = 0; i < quest->Objectives.size(); ++i)
+    {
+        QuestObjective const& obj = quest->Objectives[i];
+        if (onlyBugged && !obj.Bugged)
+            continue;
+
+        switch (obj.Type)
+        {
+            case QUEST_OBJECTIVE_ITEM:
+            {
+                uint32 curItemCount = GetItemCount(obj.ObjectID, true);
+                ItemPosCountVec dest;
+                uint8 msg = CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, obj.ObjectID, obj.Amount - curItemCount);
+                if (msg == EQUIP_ERR_OK)
+                {
+                    Item* item = StoreNewItem(dest, obj.ObjectID, true);
+                    SendNewItem(item, obj.Amount - curItemCount, true, false);
+                }
+                break;
+            }
+            case QUEST_OBJECTIVE_MONSTER:
+            {
+                if (CreatureTemplate const* creatureInfo = sObjectMgr->GetCreatureTemplate(obj.ObjectID))
+                    for (uint16 z = 0; z < obj.Amount; ++z)
+                        KilledMonster(creatureInfo, ObjectGuid::Empty);
+                break;
+            }
+            case QUEST_OBJECTIVE_GAMEOBJECT:
+            {
+                for (uint16 z = 0; z < obj.Amount; ++z)
+                    KillCreditGO(obj.ObjectID, ObjectGuid::Empty);
+                break;
+            }
+            case QUEST_OBJECTIVE_MIN_REPUTATION:
+            {
+                // assume that rep is always feasible
+                if (onlyBugged)
+                    break;
+
+                uint32 curRep = GetReputationMgr().GetReputation(obj.ObjectID);
+                if (curRep < uint32(obj.Amount))
+                    if (FactionEntry const* factionEntry = sFactionStore.LookupEntry(obj.ObjectID))
+                        GetReputationMgr().SetReputation(factionEntry, obj.Amount);
+                break;
+            }
+            case QUEST_OBJECTIVE_MAX_REPUTATION:
+            {
+                // assume that rep is always feasible
+                if (onlyBugged)
+                    break;
+
+                uint32 curRep = GetReputationMgr().GetReputation(obj.ObjectID);
+                if (curRep > uint32(obj.Amount))
+                    if (FactionEntry const* factionEntry = sFactionStore.LookupEntry(obj.ObjectID))
+                        GetReputationMgr().SetReputation(factionEntry, obj.Amount);
+                break;
+            }
+            case QUEST_OBJECTIVE_MONEY:
+            {
+                // assume that money is always feasible
+                if (onlyBugged)
+                    break;
+
+                ModifyMoney(obj.Amount);
+                break;
+            }
+        }
+    }
+}
+
+bool Player::HasQuestObjectiveComplete(Quest const* qInfo, QuestObjective const& obj)
+{
+    switch (obj.Type)
+    {
+        case QUEST_OBJECTIVE_TASK_IN_ZONE:
+        {
+            float scale = 0.0f;
+            for (QuestObjective const& task : qInfo->GetObjectives())
+            {
+                if (task.Flags & (QUEST_OBJECTIVE_FLAG_HIDE_ITEM_GAINS | QUEST_OBJECTIVE_FLAG_PART_OF_PROGRESS_BAR))
+                    scale += float(GetQuestObjectiveData(qInfo, task.StorageIndex) * task.TaskStep);
+            }
+            return scale >= 100.0f;
+        }
+        case QUEST_OBJECTIVE_PET_TRAINER_DEFEAT:
+        case QUEST_OBJECTIVE_MONSTER:
+        case QUEST_OBJECTIVE_ITEM:
+        case QUEST_OBJECTIVE_GAMEOBJECT:
+        case QUEST_OBJECTIVE_PLAYERKILLS:
+        case QUEST_OBJECTIVE_TALKTO:
+        case QUEST_OBJECTIVE_COMPLETE_CRITERIA_TREE:
+        case QUEST_OBJECTIVE_HAVE_CURRENCY:
+        case QUEST_OBJECTIVE_OBTAIN_CURRENCY:
+            return GetQuestObjectiveData(qInfo, obj.StorageIndex) >= obj.Amount;
+        case QUEST_OBJECTIVE_MIN_REPUTATION:
+            return GetReputationMgr().GetReputation(obj.ObjectID) >= obj.Amount;
+        case QUEST_OBJECTIVE_MAX_REPUTATION:
+            return GetReputationMgr().GetReputation(obj.ObjectID) <= obj.Amount;
+        case QUEST_OBJECTIVE_MONEY:
+            return HasEnoughMoney(uint64(obj.Amount));
+        case QUEST_OBJECTIVE_AREATRIGGER:
+            return GetQuestObjectiveData(qInfo, obj.StorageIndex);
+        case QUEST_OBJECTIVE_LEARNSPELL:
+            return HasSpell(obj.ObjectID);
+        case QUEST_OBJECTIVE_CURRENCY:
+            return HasCurrency(obj.ObjectID, obj.Amount);
+        default:
+            TC_LOG_DEBUG(LOG_FILTER_PLAYER, "Player::CanCompleteQuest unknown objective type %u", obj.Type);
+            return false;
+    }
+}
+
 bool Player::CanCompleteQuest(uint32 quest_id)
 {
     if (quest_id)
@@ -18866,8 +18987,6 @@ bool Player::CanCompleteQuest(uint32 quest_id)
 
         if (q_status->Status == QUEST_STATUS_INCOMPLETE)
         {
-            bool allObjComplete = true;
-
             for (QuestObjective const& obj : qInfo->GetObjectives())
             {
                 if (obj.Flags & (QUEST_OBJECTIVE_FLAG_HIDE_ITEM_GAINS | QUEST_OBJECTIVE_FLAG_PART_OF_PROGRESS_BAR))
@@ -18876,65 +18995,14 @@ bool Player::CanCompleteQuest(uint32 quest_id)
                 if (obj.Flags & QUEST_OBJECTIVE_FLAG_OPTIONAL) 
                     continue;
 
-                switch (obj.Type)
-                {
-                    case QUEST_OBJECTIVE_TASK_IN_ZONE:
-                    {
-                        float scale = 0.0f;
-                        for (QuestObjective const& task : qInfo->GetObjectives())
-                        {
-                            if (task.Flags & (QUEST_OBJECTIVE_FLAG_HIDE_ITEM_GAINS | QUEST_OBJECTIVE_FLAG_PART_OF_PROGRESS_BAR))
-                                scale += float(GetQuestObjectiveData(qInfo, task.StorageIndex) * task.TaskStep);
-                        }
-                        allObjComplete = scale >= 100.0f;
-                        break;
-                    }
-                    case QUEST_OBJECTIVE_PET_TRAINER_DEFEAT:
-                    case QUEST_OBJECTIVE_MONSTER:
-                    case QUEST_OBJECTIVE_ITEM:
-                    case QUEST_OBJECTIVE_GAMEOBJECT:
-                    case QUEST_OBJECTIVE_PLAYERKILLS:
-                    case QUEST_OBJECTIVE_TALKTO:
-                    case QUEST_OBJECTIVE_COMPLETE_CRITERIA_TREE:
-                    case QUEST_OBJECTIVE_HAVE_CURRENCY:
-                    case QUEST_OBJECTIVE_OBTAIN_CURRENCY:
-                        if (GetQuestObjectiveData(qInfo, obj.StorageIndex) < obj.Amount)
-                            allObjComplete = false;
-                        break;
-                    case QUEST_OBJECTIVE_MIN_REPUTATION:
-                        if (GetReputationMgr().GetReputation(obj.ObjectID) < obj.Amount)
-                            allObjComplete = false;
-                        break;
-                    case QUEST_OBJECTIVE_MAX_REPUTATION:
-                        if (GetReputationMgr().GetReputation(obj.ObjectID) > obj.Amount)
-                            allObjComplete = false;
-                        break;
-                    case QUEST_OBJECTIVE_MONEY:
-                        if (!HasEnoughMoney(uint64(obj.Amount)))
-                            allObjComplete = false;
-                        break;
-                    case QUEST_OBJECTIVE_AREATRIGGER:
-                        if (!GetQuestObjectiveData(qInfo, obj.StorageIndex))
-                            allObjComplete = false;
-                        break;
-                    case QUEST_OBJECTIVE_LEARNSPELL:
-                        if (!HasSpell(obj.ObjectID))
-                            allObjComplete = false;
-                        break;
-                    case QUEST_OBJECTIVE_CURRENCY:
-                        if (!HasCurrency(obj.ObjectID, obj.Amount))
-                            allObjComplete = false;
-                        break;
-                    default:
-                        TC_LOG_ERROR(LOG_FILTER_PLAYER, "Player::CanCompleteQuest unknown objective type %u", obj.Type);
-                        return false;
-                }
+                if (!HasQuestObjectiveComplete(qInfo, obj))
+                    return false;
             }
 
             if (qInfo->HasSpecialFlag(QUEST_SPECIAL_FLAGS_TIMED) && q_status->Timer == 0)
                 return false;
 
-            return allObjComplete;
+            return true;
         }
     }
     return false;
@@ -19150,6 +19218,9 @@ void Player::AddQuest(Quest const* quest, Object* questGiver)
         questGiver->ToCreature()->AI()->OnStartQuest(this, quest);
 
     SetQuestUpdate(quest_id);
+
+    // automatically complete objectives marked as bugged
+    AutoCompleteObjectives(quest, true);
 
     AddDelayedEvent(100, [this, quest_id]() -> void
     {
@@ -23114,7 +23185,7 @@ void Player::_LoadInventory(PreparedQueryResult result, PreparedQueryResult arti
         {
             if (Item* parent = GetItemByGuid(childItem->GetGuidValue(ITEM_FIELD_CREATOR)))
             {
-                InventoryResult res = CanUseItem(parent);
+                InventoryResult res = CanUseItem(parent , false );
                 if (res == EQUIP_ERR_OK)
                 {
                     parent->SetChildItem(childItem->GetGUID());
@@ -30408,10 +30479,6 @@ void Player::learnQuestRewardedSpells()
 
 void Player::learnSkillRewardedSpells(uint32 skillId, uint32 skillValue)
 {
-    // bad hack to work around data being suited only for the client - AcquireMethod == SKILL_LINE_ABILITY_LEARNED_ON_SKILL_LEARN for riding client uses it to show riding in spellbook as trainable
-    if (skillId == SKILL_RIDING)
-        return;
-
     uint64 raceMask  = getRaceMask();
     uint32 classMask = getClassMask();
     for (SkillLineAbilityEntry const* ability : sDB2Manager._skillLineAbilityContainer[skillId])
@@ -30424,6 +30491,10 @@ void Player::learnSkillRewardedSpells(uint32 skillId, uint32 skillValue)
             continue;
 
         if (ability->AcquireMethod != SKILL_LINE_ABILITY_LEARNED_ON_SKILL_VALUE && ability->AcquireMethod != SKILL_LINE_ABILITY_LEARNED_ON_SKILL_LEARN && ability->AcquireMethod != SKILL_LINE_ABILITY_NOT_AUTO_LEARN)
+            continue;
+
+        // AcquireMethod == 2 && NumSkillUps == 1 --> automatically learn riding skill spell, else we skip it (client shows riding in spellbook as trainable).
+        if (skillId == SKILL_RIDING && (ability->AcquireMethod != SKILL_LINE_ABILITY_LEARNED_ON_SKILL_LEARN || ability->NumSkillUps != 1))
             continue;
 
         if (ability->AcquireMethod == SKILL_LINE_ABILITY_NOT_AUTO_LEARN)
@@ -30958,7 +31029,7 @@ void Player::UpdateForQuestWorldObjects()
                     if (garr->GetCountOfBluePrints())
                         buildUpdateBlock = true;
             }
-            if (!buildUpdateBlock && obj->HasFlag(UNIT_FIELD_NPC_FLAGS2, UNIT_NPC_FLAG2_GARRISON_MISSION_NPC))
+            if (!buildUpdateBlock && obj->HasFlag(UNIT_FIELD_NPC_FLAGS2, UNIT_NPC_FLAG2_GARRISON_MISSION_NPC | UNIT_NPC_FLAG2_SHIPMENT_CRAFTER))
             {
                 if (Garrison* garr = GetGarrisonPtr())
                     if (garr->GetCountOFollowers())
@@ -36186,7 +36257,7 @@ bool Player::IsForbiddenMapForLevel(uint32 mapid, uint32 zone)
         case 1220: //Legion: Broken Isles
         {
             //Allied Races start loc
-            if (m_areaId == 7999 || m_areaId == 9502)
+            if (GetAreaId() == 7999 || GetAreaId() == 9502)
                 return false;
 
             minLevel = 98;
@@ -39514,4 +39585,71 @@ std::string Player::GetShortDescription() const
     std::stringstream oss;
     oss << GetName() << ":" << GetGUIDLow() << ":" << GetSession()->GetAccountId() << "@" << GetSession()->GetRemoteAddress().c_str() << "]";
     return oss.str();
+}
+
+
+void Player::ApplyOnBagsItems(std::function<bool(Player*, Item*, uint8 /*bag*/, uint8 /*slot*/)>&& function)
+{
+    for (uint32 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
+    {
+        if (Item* item = GetItemByPos(INVENTORY_SLOT_BAG_0, i))
+        {
+            if (!function(this, item, INVENTORY_SLOT_BAG_0, i))
+                return;
+        }
+    }
+
+    for (uint32 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
+    {
+        if (Bag* bag = (Bag*)GetItemByPos(INVENTORY_SLOT_BAG_0, i))
+        {
+            for (uint32 j = 0; j < bag->GetBagSize(); ++j)
+            {
+                if (Item* item = GetItemByPos(i, j))
+                {
+                    if (!function(this, item, i, j))
+                        return;
+                }
+            }
+        }
+    }
+}
+
+void Player::ApplyOnBankItems(std::function<bool(Player*, Item*, uint8 /*bag*/, uint8 /*slot*/)>&& function)
+{
+    for (uint32 i = BANK_SLOT_ITEM_START; i < BANK_SLOT_ITEM_END; ++i)
+    {
+        if (Item* item = GetItemByPos(INVENTORY_SLOT_BAG_0, i))
+        {
+            if (!function(this, item, INVENTORY_SLOT_BAG_0, i))
+                return;
+        }
+    }
+
+    for (uint32 i = BANK_SLOT_BAG_START; i < BANK_SLOT_BAG_END; ++i)
+    {
+        if (Bag* bag = (Bag*)GetItemByPos(INVENTORY_SLOT_BAG_0, i))
+        {
+            for (uint32 j = 0; j < bag->GetBagSize(); ++j)
+            {
+                if (Item* item = GetItemByPos(i, j))
+                {
+                    if (!function(this, item, i, j))
+                        return;
+                }
+            }
+        }
+    }
+}
+
+void Player::ApplyOnReagentBankItems(std::function<bool(Player*, Item*, uint8 /*bag*/, uint8 /*slot*/)>&& function)
+{
+    for (uint32 i = REAGENT_SLOT_START; i < REAGENT_SLOT_END; ++i)
+    {
+        if (Item* item = GetItemByPos(INVENTORY_SLOT_BAG_0, i))
+        {
+            if (!function(this, item, INVENTORY_SLOT_BAG_0, i))
+                return;
+        }
+    }
 }

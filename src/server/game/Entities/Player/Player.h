@@ -664,7 +664,7 @@ enum ChildEquipmentSlots
 };
 
 #define INVENTORY_SLOT_BAG_0    255
-#define INVENTORY_DEFAULT_SIZE  16
+#define INVENTORY_DEFAULT_SIZE  20
 
 enum EquipmentSlots                                         // 19 slots
 {
@@ -1741,6 +1741,11 @@ class Player : public Unit, public GridObject<Player>
         bool AutoStoreLoot(uint32 loot_id, LootStore const& store, bool broadcast = true, uint32 itemContext = 0) { return AutoStoreLoot(NULL_BAG, NULL_SLOT, loot_id, store, broadcast, itemContext); }
         void StoreLootItem(uint8 lootSlot, Loot* loot);
 
+        // Sort Bags
+        void ApplyOnBagsItems(std::function<bool(Player*, Item*, uint8 /*bag*/, uint8 /*slot*/)>&& function);
+        void ApplyOnBankItems(std::function<bool(Player*, Item*, uint8 /*bag*/, uint8 /*slot*/)>&& function);
+        void ApplyOnReagentBankItems(std::function<bool(Player*, Item*, uint8 /*bag*/, uint8 /*slot*/)>&& function);
+
         void AddTrackingQuestIfNeeded(ObjectGuid sourceGuid);
 
         void DepositItemToReagentBank();
@@ -1938,6 +1943,8 @@ class Player : public Unit, public GridObject<Player>
         bool CanSeeStartQuest(Quest const* quest);
         bool CanTakeQuest(Quest const* quest, bool msg);
         bool CanAddQuest(Quest const* quest, bool msg);
+        void AutoCompleteObjectives(Quest const* quest, bool onlyBugged);
+        bool HasQuestObjectiveComplete(Quest const* qInfo, QuestObjective const& obj);
         bool CanCompleteQuest(uint32 quest_id);
         bool CanCompleteRepeatableQuest(Quest const* quest);
         bool CanRewardQuest(Quest const* quest, bool msg);

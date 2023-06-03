@@ -25,23 +25,58 @@ class quest_commandscript : public CommandScript
 public:
     quest_commandscript() : CommandScript("quest_commandscript") { }
 
-    ChatCommand* GetCommands() const override
+    std::vector<ChatCommand> GetCommands() const override
     {
-        static ChatCommand questCommandTable[] =
+        static std::vector<ChatCommand> questCommandTable =
         {
-            { "add",            SEC_ADMINISTRATOR,  false, &HandleQuestAdd,                    "", NULL },
-            { "complete",       SEC_ADMINISTRATOR,  false, &HandleQuestComplete,               "", NULL },
-            { "remove",         SEC_ADMINISTRATOR,  false, &HandleQuestRemove,                 "", NULL },
-            { "reward",         SEC_ADMINISTRATOR,  false, &HandleQuestReward,                 "", NULL },
-            { "status",         SEC_PLAYER,         false, &HandleQuestStatus,                 "", NULL },
-            { NULL,             SEC_PLAYER,         false, NULL,                               "", NULL }
+            { "autocomplete",   SEC_ADMINISTRATOR,  false, &HandleQuestAutocomplete,           ""},
+            { "add",            SEC_ADMINISTRATOR,  false, &HandleQuestAdd,                    ""},
+            { "complete",       SEC_ADMINISTRATOR,  false, &HandleQuestComplete,               ""},
+            { "remove",         SEC_ADMINISTRATOR,  false, &HandleQuestRemove,                 ""},
+            { "reward",         SEC_ADMINISTRATOR,  false, &HandleQuestReward,                 ""},
+            { "status",         SEC_PLAYER,         false, &HandleQuestStatus,                 ""}
         };
-        static ChatCommand commandTable[] =
+        static std::vector<ChatCommand> commandTable =
         {
-            { "quest",          SEC_ADMINISTRATOR,  false, NULL,                  "", questCommandTable },
-            { NULL,             SEC_PLAYER,         false, NULL,                               "", NULL }
+            { "quest",          SEC_ADMINISTRATOR,  false, NULL,                  "", questCommandTable }
         };
         return commandTable;
+    }
+
+    static bool HandleQuestAutocomplete(ChatHandler* handler, const char* args)
+    {
+        Player* player = handler->getSelectedPlayer();
+        if (!player)
+        {
+            handler->SendSysMessage(LANG_NO_CHAR_SELECTED);
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        // .quest autocomplete #entry
+        // number or [name] Shift-click form |color|Hquest:quest_id:quest_level:min_level:max_level|h[name]|h|r
+        char* cId = handler->extractKeyFromLink((char*)args, "Hquest");
+        if (!cId)
+            return false;
+
+        uint32 entry = atol(cId);
+
+        Quest const* quest = sQuestDataStore->GetQuestTemplate(entry);
+
+        // If player doesn't have the quest
+        if (!quest || player->GetQuestStatus(entry) == QUEST_STATUS_NONE)
+        {
+            handler->PSendSysMessage(LANG_COMMAND_QUEST_NOTFOUND, entry);
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        for (const QuestObjective& obj : quest->GetObjectives())
+            sObjectMgr->AddQuestObjectiveBuggedState(obj, player->HasQuestObjectiveComplete(quest, obj));
+
+        handler->PSendSysMessage(600032, entry, player->GetName());
+
+        return true;
     }
 
     static bool HandleQuestAdd(ChatHandler* handler, const char* args)
@@ -175,60 +210,7 @@ public:
             return false;
         }
 
-        for (uint32 i = 0; i < quest->Objectives.size(); ++i)
-        {
-            QuestObjective const& obj = quest->Objectives[i];
-
-            switch (obj.Type)
-            {
-                case QUEST_OBJECTIVE_ITEM:
-                {
-                    uint32 curItemCount = player->GetItemCount(obj.ObjectID, true);
-                    ItemPosCountVec dest;
-                    uint8 msg = player->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, obj.ObjectID, obj.Amount - curItemCount);
-                    if (msg == EQUIP_ERR_OK)
-                    {
-                        Item* item = player->StoreNewItem(dest, obj.ObjectID, true);
-                        player->SendNewItem(item, obj.Amount - curItemCount, true, false);
-                    }
-                    break;
-                }
-                case QUEST_OBJECTIVE_MONSTER:
-                {
-                    if (CreatureTemplate const* creatureInfo = sObjectMgr->GetCreatureTemplate(obj.ObjectID))
-                        for (uint16 z = 0; z < obj.Amount; ++z)
-                            player->KilledMonster(creatureInfo, ObjectGuid::Empty);
-                    break;
-                }
-                case QUEST_OBJECTIVE_GAMEOBJECT:
-                {
-                    for (uint16 z = 0; z < obj.Amount; ++z)
-                        player->KillCreditGO(obj.ObjectID, ObjectGuid::Empty);
-                    break;
-                }
-                case QUEST_OBJECTIVE_MIN_REPUTATION:
-                {
-                    uint32 curRep = player->GetReputationMgr().GetReputation(obj.ObjectID);
-                    if (curRep < uint32(obj.Amount))
-                        if (FactionEntry const* factionEntry = sFactionStore.LookupEntry(obj.ObjectID))
-                            player->GetReputationMgr().SetReputation(factionEntry, obj.Amount);
-                    break;
-                }
-                case QUEST_OBJECTIVE_MAX_REPUTATION:
-                {
-                    uint32 curRep = player->GetReputationMgr().GetReputation(obj.ObjectID);
-                    if (curRep > uint32(obj.Amount))
-                        if (FactionEntry const* factionEntry = sFactionStore.LookupEntry(obj.ObjectID))
-                            player->GetReputationMgr().SetReputation(factionEntry, obj.Amount);
-                    break;
-                }
-                case QUEST_OBJECTIVE_MONEY:
-                {
-                    player->ModifyMoney(obj.Amount);
-                    break;
-                }
-            }
-        }
+        player->AutoCompleteObjectives(quest, false);
 
         //if (sWorld->getBoolConfig(CONFIG_QUEST_ENABLE_QUEST_TRACKER)) // check if Quest Tracker is enabled
         //{
