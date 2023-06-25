@@ -1588,6 +1588,7 @@ class Player : public Unit, public GridObject<Player>
 		// PlayedTimeReward
         uint32 ptr_Interval;
         uint32 ptr_Money;
+        uint32 ptr_Item;
 
 
         // Played Time Stuff

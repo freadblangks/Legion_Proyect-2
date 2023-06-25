@@ -282,6 +282,7 @@ m_achievementMgr(sf::safe_ptr<AchievementMgr<Player>>(this))
 	// PlayedTimeReward
     ptr_Interval = sConfigMgr->GetIntDefault("PlayedTimeReward.Interval", 0);
     ptr_Money = sConfigMgr->GetIntDefault("PlayedTimeReward.Money", 0);
+    ptr_Item = sConfigMgr->GetIntDefault("PlayedTimeReward.Item", 0);
 
     m_createdtime = time(NULL);
     m_logintime = time(NULL);
@@ -1534,8 +1535,9 @@ void Player::Update(uint32 p_time)
     {
         if (ptr_Interval <= p_time)
         {
-            ChatHandler(GetSession()).PSendSysMessage("[PlayedTimeReward] :: You earned rewards for staying online.");								   
+            ChatHandler(GetSession()).PSendSysMessage("[PlayedTimeReward] :: Вы получили вознаграждение за пребывание в сети.");								   
             ModifyMoney(ptr_Money);
+            AddItem(ptr_Item, 1, 0);
             ptr_Interval = sConfigMgr->GetIntDefault("PlayedTimeReward.Interval", 0);
         }
         else
